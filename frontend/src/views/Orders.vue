@@ -2,24 +2,25 @@
   <div class="min-h-screen bg-gray-50">
     <div class="container mx-auto px-4 py-6">
       <h1 class="text-2xl font-bold text-gray-800 mb-6">我的订单</h1>
-      
+
       <el-card class="mb-6">
         <el-tabs v-model="activeTab" @tab-change="fetchOrders">
           <el-tab-pane label="进行中" name="in_progress" />
+          <el-tab-pane label="待确认" name="pending_confirm" />
           <el-tab-pane label="已完成" name="completed" />
           <el-tab-pane label="全部" name="" />
         </el-tabs>
       </el-card>
-      
+
       <div v-if="loading" class="text-center py-16">
         <el-icon class="animate-spin text-4xl text-gray-400"><Loading /></el-icon>
       </div>
-      
+
       <div v-else-if="orders.length === 0" class="text-center py-16">
         <el-icon class="text-6xl text-gray-300"><Document /></el-icon>
         <p class="mt-4 text-gray-500">暂无订单</p>
       </div>
-      
+
       <div v-else class="space-y-4">
         <el-card v-for="order in orders" :key="order.id" class="hover:shadow-md">
           <div class="flex items-start justify-between">
@@ -30,9 +31,10 @@
                   {{ getTypeName(order.type) }}
                 </el-tag>
                 <el-tag v-if="order.status === 'in_progress'" type="warning" class="ml-2" size="small">进行中</el-tag>
+                <el-tag v-else-if="order.status === 'pending_confirm'" type="primary" class="ml-2" size="small">待居民确认</el-tag>
                 <el-tag v-else-if="order.status === 'completed'" type="success" class="ml-2" size="small">已完成</el-tag>
               </div>
-              
+
               <div class="text-gray-600 text-sm mb-3">
                 <p v-if="user?.role === 'volunteer'">
                   <el-icon class="mr-1"><User /></el-icon>
@@ -48,34 +50,64 @@
                 </p>
                 <p v-if="order.service_hours" class="mt-1">
                   <el-icon class="mr-1"><Clock /></el-icon>
-                  服务时长：{{ order.service_hours }} 小时
+                  实际服务时长：{{ order.service_hours }} 小时
                 </p>
+                <el-alert
+                  v-if="order.status === 'in_progress' && order.reject_reason"
+                  class="mt-2"
+                  type="error"
+                  :closable="false"
+                  show-icon
+                  title="居民退回了本次服务结果"
+                  :description="`退回原因：${order.reject_reason}`"
+                />
+                <el-alert
+                  v-else-if="order.status === 'pending_confirm'"
+                  class="mt-2"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  :title="user?.role === 'volunteer'
+                    ? '已提交服务结果，等待居民确认后结算'
+                    : `志愿者已提交实际时长 ${order.service_hours} 小时，请确认服务结果`"
+                />
               </div>
-              
+
               <div class="text-xs text-gray-400">
                 下单时间：{{ new Date(order.created_at).toLocaleString() }}
               </div>
             </div>
-            
+
             <div class="flex flex-col gap-2">
-              <el-button 
-                v-if="order.status === 'in_progress'" 
-                type="primary" 
+              <el-button
+                v-if="order.status === 'in_progress' && user?.role === 'volunteer'"
+                type="primary"
                 size="small"
-                @click="handleComplete(order)"
+                @click="showSubmitDialog(order)"
               >
-                完成服务
+                {{ order.reject_reason ? '重新提交' : '提交服务结果' }}
               </el-button>
-              <el-button 
-                v-if="order.status === 'completed' && !hasReviewed(order.id)" 
-                type="success" 
+              <template v-if="order.status === 'pending_confirm' && user?.role === 'resident'">
+                <el-button type="success" size="small" @click="handleConfirm(order)">
+                  确认结算
+                </el-button>
+                <el-button type="warning" size="small" @click="showRejectDialog(order)">
+                  退回重做
+                </el-button>
+              </template>
+              <el-button
+                v-if="order.status === 'completed' && !order.reviewed"
+                type="success"
                 size="small"
                 @click="showReviewDialog(order)"
               >
                 去评价
               </el-button>
-              <el-button 
-                type="text" 
+              <el-tag v-else-if="order.status === 'completed' && order.reviewed" type="info" size="small">
+                已评价
+              </el-tag>
+              <el-button
+                type="text"
                 size="small"
                 @click="handleMessage(order)"
               >
@@ -87,7 +119,40 @@
         </el-card>
       </div>
     </div>
-    
+
+    <el-dialog v-model="submitDialogVisible" title="提交服务结果" width="500px">
+      <el-form label-width="100px">
+        <el-form-item label="实际服务时长">
+          <el-input-number v-model="submitForm.service_hours" :min="0.5" :max="24" :step="0.5" :precision="2" />
+          <span class="ml-2 text-gray-500 text-sm">小时</span>
+        </el-form-item>
+        <p class="text-xs text-gray-400 pl-[100px]">提交后由居民确认，确认后才会计入服务时长和积分。</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="submitDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitService">提交</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="rejectDialogVisible" title="退回服务结果" width="500px">
+      <el-form label-width="80px">
+        <el-form-item label="退回原因">
+          <el-input
+            v-model="rejectForm.reason"
+            type="textarea"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+            placeholder="请说明服务哪里没完成，志愿者将据此继续服务"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rejectDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="submitting" @click="submitReject">确认退回</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="reviewDialogVisible" title="服务评价" width="500px">
       <el-form :model="reviewForm" label-width="80px">
         <el-form-item label="评分">
@@ -119,11 +184,20 @@ const user = computed(() => userStore.user)
 const orders = ref([])
 const loading = ref(false)
 const activeTab = ref('in_progress')
+
+const submitDialogVisible = ref(false)
+const rejectDialogVisible = ref(false)
 const reviewDialogVisible = ref(false)
+const submitting = ref(false)
 const submittingReview = ref(false)
 const currentOrder = ref(null)
-const reviewedOrders = ref([])
 
+const submitForm = ref({
+  service_hours: 1
+})
+const rejectForm = ref({
+  reason: ''
+})
 const reviewForm = ref({
   rating: 5,
   comment: ''
@@ -140,35 +214,80 @@ const typeMap = {
 const getTypeName = (type) => typeMap[type]?.name || type
 const getTypeColor = (type) => typeMap[type]?.color || 'info'
 
-const hasReviewed = (orderId) => reviewedOrders.value.includes(orderId)
-
 const fetchOrders = async () => {
   loading.value = true
   try {
     const params = activeTab.value ? { status: activeTab.value } : {}
     const res = await api.get('/orders', { params })
-    orders.value = res.data.orders
+    orders.value = res.data.orders.map((order) => ({
+      ...order,
+      reviewed: Boolean(order.reviewed)
+    }))
   } finally {
     loading.value = false
   }
 }
 
-const handleComplete = async (order) => {
+const showSubmitDialog = (order) => {
+  currentOrder.value = order
+  submitForm.value = { service_hours: Number(order.service_hours) || 1 }
+  submitDialogVisible.value = true
+}
+
+const submitService = async () => {
   try {
-    await ElMessageBox.confirm('确认服务已完成吗？', '完成确认', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'info'
-    })
-    
-    await api.put(`/orders/${order.id}/complete`, { service_hours: 1 })
-    ElMessage.success('服务已完成')
+    submitting.value = true
+    await api.post(`/orders/${currentOrder.value.id}/submit`, submitForm.value)
+    ElMessage.success('服务结果已提交，等待居民确认')
+    submitDialogVisible.value = false
+    fetchOrders()
+  } finally {
+    submitting.value = false
+  }
+}
+
+const handleConfirm = async (order) => {
+  try {
+    await ElMessageBox.confirm(
+      `确认服务已完成吗？确认后将为志愿者记入 ${order.service_hours} 小时服务时长和 ${Math.round(order.service_hours * 10)} 积分。`,
+      '确认结算',
+      {
+        confirmButtonText: '确认结算',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+
+    await api.post(`/orders/${order.id}/confirm`)
+    ElMessage.success('已确认结算')
     fetchOrders()
     userStore.fetchUserInfo()
   } catch (e) {
     if (e !== 'cancel') {
       ElMessage.error(e.response?.data?.message || '操作失败')
     }
+  }
+}
+
+const showRejectDialog = (order) => {
+  currentOrder.value = order
+  rejectForm.value = { reason: '' }
+  rejectDialogVisible.value = true
+}
+
+const submitReject = async () => {
+  if (!rejectForm.value.reason.trim()) {
+    ElMessage.warning('请填写退回原因')
+    return
+  }
+  try {
+    submitting.value = true
+    await api.post(`/orders/${currentOrder.value.id}/reject`, rejectForm.value)
+    ElMessage.success('已退回，志愿者可重新提交')
+    rejectDialogVisible.value = false
+    fetchOrders()
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -182,9 +301,9 @@ const submitReview = async () => {
   try {
     submittingReview.value = true
     await api.post(`/orders/${currentOrder.value.id}/review`, reviewForm.value)
-    reviewedOrders.value.push(currentOrder.value.id)
     ElMessage.success('评价成功')
     reviewDialogVisible.value = false
+    fetchOrders()
   } catch (e) {
     ElMessage.error(e.response?.data?.message || '评价失败')
   } finally {

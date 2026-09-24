@@ -55,13 +55,19 @@ CREATE TABLE IF NOT EXISTS needs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='需求表';
 
 -- 订单表
+-- 状态: in_progress-服务中(志愿者尚未提交/被退回后重做),
+--       pending_confirm-志愿者已提交实际时长, 等待居民确认,
+--       completed-居民已确认并结算, cancelled-已取消
 CREATE TABLE IF NOT EXISTS orders (
   id INT PRIMARY KEY AUTO_INCREMENT,
   need_id INT NOT NULL COMMENT '需求ID',
   user_id INT NOT NULL COMMENT '需求发布者ID',
   volunteer_id INT NOT NULL COMMENT '志愿者ID',
-  status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress' COMMENT '状态',
-  service_hours DECIMAL(8, 2) DEFAULT 0 COMMENT '服务时长(小时)',
+  status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled') DEFAULT 'in_progress' COMMENT '状态',
+  service_hours DECIMAL(8, 2) DEFAULT 0 COMMENT '志愿者提交的实际服务时长(小时)',
+  reject_reason VARCHAR(500) COMMENT '居民退回原因(最近一次)',
+  submitted_at DATETIME COMMENT '志愿者提交服务结果时间',
+  confirmed_at DATETIME COMMENT '居民确认结算时间',
   start_time DATETIME COMMENT '开始时间',
   end_time DATETIME COMMENT '结束时间',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -75,6 +81,7 @@ CREATE TABLE IF NOT EXISTS orders (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单表';
 
 -- 评价表
+-- 同一订单中每个参与方只能评价一次, 防止重复评价
 CREATE TABLE IF NOT EXISTS reviews (
   id INT PRIMARY KEY AUTO_INCREMENT,
   order_id INT NOT NULL COMMENT '订单ID',
@@ -86,6 +93,7 @@ CREATE TABLE IF NOT EXISTS reviews (
   FOREIGN KEY (order_id) REFERENCES orders(id),
   FOREIGN KEY (reviewer_id) REFERENCES users(id),
   FOREIGN KEY (target_id) REFERENCES users(id),
+  UNIQUE KEY uk_order_reviewer (order_id, reviewer_id),
   INDEX idx_target_id (target_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='评价表';
 

@@ -1,6 +1,44 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 
+// 旧库升级: 扩展 orders 状态枚举并补齐确认流程所需字段
+const migrateOrders = async (pool) => {
+  await pool.query(`
+    ALTER TABLE orders
+      MODIFY COLUMN status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled')
+      DEFAULT 'in_progress'
+  `);
+
+  const [columns] = await pool.query('SHOW COLUMNS FROM orders');
+  const columnNames = columns.map((col) => col.Field);
+
+  if (!columnNames.includes('reject_reason')) {
+    await pool.query("ALTER TABLE orders ADD COLUMN reject_reason VARCHAR(500) COMMENT '居民退回原因(最近一次)' AFTER service_hours");
+  }
+  if (!columnNames.includes('submitted_at')) {
+    await pool.query("ALTER TABLE orders ADD COLUMN submitted_at DATETIME COMMENT '志愿者提交服务结果时间' AFTER reject_reason");
+  }
+  if (!columnNames.includes('confirmed_at')) {
+    await pool.query("ALTER TABLE orders ADD COLUMN confirmed_at DATETIME COMMENT '居民确认结算时间' AFTER submitted_at");
+  }
+};
+
+// 旧库升级: 为 reviews 增加 (order_id, reviewer_id) 唯一约束, 防止重复评价
+const migrateReviews = async (pool) => {
+  const [indexes] = await pool.query('SHOW INDEX FROM reviews WHERE Key_name = ?', ['uk_order_reviewer']);
+  if (indexes.length > 0) return;
+
+  // 清理旧逻辑下可能产生的重复评价，仅保留每人最早一条
+  await pool.query(`
+    DELETE r1 FROM reviews r1
+    JOIN reviews r2
+      ON r1.order_id = r2.order_id
+     AND r1.reviewer_id = r2.reviewer_id
+     AND r1.id > r2.id
+  `);
+  await pool.query('ALTER TABLE reviews ADD UNIQUE KEY uk_order_reviewer (order_id, reviewer_id)');
+};
+
 const initData = async () => {
   console.log('开始初始化数据库...');
 
@@ -68,14 +106,20 @@ const initData = async () => {
     console.log('✅ 需求表创建完成');
 
     // 创建订单表
+    // 状态: in_progress-服务中(志愿者尚未提交/被退回后重做),
+    //       pending_confirm-志愿者已提交实际时长, 等待居民确认,
+    //       completed-居民已确认并结算, cancelled-已取消
     await pool.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id INT PRIMARY KEY AUTO_INCREMENT,
         need_id INT NOT NULL,
         user_id INT NOT NULL,
         volunteer_id INT NOT NULL,
-        status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress',
+        status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled') DEFAULT 'in_progress',
         service_hours DECIMAL(8, 2) DEFAULT 0,
+        reject_reason VARCHAR(500),
+        submitted_at DATETIME,
+        confirmed_at DATETIME,
         start_time DATETIME,
         end_time DATETIME,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -90,7 +134,11 @@ const initData = async () => {
     `);
     console.log('✅ 订单表创建完成');
 
+    // 兼容旧库: 补齐新状态与新字段
+    await migrateOrders(pool);
+
     // 创建评价表
+    // 同一订单中每个参与方只能评价一次
     await pool.query(`
       CREATE TABLE IF NOT EXISTS reviews (
         id INT PRIMARY KEY AUTO_INCREMENT,
@@ -103,9 +151,11 @@ const initData = async () => {
         FOREIGN KEY (order_id) REFERENCES orders(id),
         FOREIGN KEY (reviewer_id) REFERENCES users(id),
         FOREIGN KEY (target_id) REFERENCES users(id),
+        UNIQUE KEY uk_order_reviewer (order_id, reviewer_id),
         INDEX idx_target_id (target_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await migrateReviews(pool);
     console.log('✅ 评价表创建完成');
 
     // 创建消息表

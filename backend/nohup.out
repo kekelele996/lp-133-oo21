@@ -1,0 +1,5 @@
+
+> volunteer-backend@1.0.0 start
+> node server.js
+
+志愿者互助平台后端服务启动成功，端口: 3233
